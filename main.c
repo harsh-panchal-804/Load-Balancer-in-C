@@ -7,32 +7,63 @@
 #include <netinet/tcp.h>
 #include <pthread.h>
 #include <errno.h>
+#include <netdb.h>
 
 #define MAX_BACKEND   3
 #define LISTEN_PORT   3000
 #define BUFFER_SIZE   (1024 * 1024)
 
-const char *backends_ip[]   = { "13.203.231.9", "13.203.231.9", "13.203.231.9" };
-const int   backend_port[]  = { 3001,             3002,             3003 };
+const char *backends_ip[]   = { 
+    "ec2-13-203-231-9.ap-south-1.compute.amazonaws.com",
+    "ec2-13-203-231-9.ap-south-1.compute.amazonaws.com",
+    "ec2-13-203-231-9.ap-south-1.compute.amazonaws.com" 
+};
+const int   backend_port[]  = { 3001, 3002, 3003 };
 int         backend_index   = MAX_BACKEND - 1;
 
+/// global mutex
+pthread_mutex_t backend_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 void get_next_backend() {
+    pthread_mutex_lock(&backend_mutex);
     backend_index = (backend_index + 1) % MAX_BACKEND;
+    pthread_mutex_unlock(&backend_mutex);
 }
 
 int connect_to_backend(int idx) {
-    int s = socket(AF_INET, SOCK_STREAM, 0);
-    if (s < 0) { perror("socket()"); return -1; }
-    struct sockaddr_in srv = {0};
-    srv.sin_family = AF_INET;
-    srv.sin_port   = htons(backend_port[idx]);
-    if (inet_pton(AF_INET, backends_ip[idx], &srv.sin_addr) <= 0) {
-        perror("inet_pton()"); close(s); return -1;
+    struct addrinfo hints, *res, *rp;
+    char port_str[6];
+    int sock = -1;
+
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;      // permit both ipv4 and ipv6
+    hints.ai_socktype = SOCK_STREAM; 
+
+    snprintf(port_str, sizeof(port_str), "%d", backend_port[idx]);
+
+    if (getaddrinfo(backends_ip[idx], port_str, &hints, &res) != 0) {
+        perror("getaddrinfo");
+        return -1;
     }
-    if (connect(s, (struct sockaddr*)&srv, sizeof(srv)) < 0) {
-        perror("connect()"); close(s); return -1;
+
+    for (rp = res; rp != NULL; rp = rp->ai_next) {
+        sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (sock < 0) continue;
+
+        if (connect(sock, rp->ai_addr, rp->ai_addrlen) == 0) {
+            break;  
+        }
+
+        close(sock);
+        sock = -1;
     }
-    return s;
+
+    freeaddrinfo(res);
+
+    if (sock < 0) {
+        fprintf(stderr, "Could not connect to backend %s:%s\n", backends_ip[idx], port_str);
+    }
+    return sock;
 }
 
 typedef struct { int client_sock; } thread_arg;
@@ -51,7 +82,6 @@ void *handle_client(void *p) {
     char *buf = malloc(BUFFER_SIZE);
     if (!buf) { close(client); return NULL; }
 
-    // 1) Read request headers
     ssize_t req_len = 0, n;
     while ((n = recv(client, buf + req_len, BUFFER_SIZE - req_len, 0)) > 0) {
         req_len += n;
@@ -60,22 +90,28 @@ void *handle_client(void *p) {
     }
     if (n < 0) { perror("recv(client)"); goto cleanup_client; }
 
-    // 2) Connect and forward request to backend
+   
     get_next_backend();
-    int backend = connect_to_backend(backend_index);
+    int backend;
+    
+    pthread_mutex_lock(&backend_mutex);
+    backend = backend_index;
+    pthread_mutex_unlock(&backend_mutex);
+
+    backend = connect_to_backend(backend);
     if (backend < 0) goto cleanup_client;
     setsockopt(backend, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
+  
     ssize_t sent = 0;
     while (sent < req_len) {
         ssize_t w = send(backend, buf + sent, req_len - sent, 0);
         if (w <= 0) { perror("send(backend)"); goto cleanup_both; }
         sent += w;
     }
-    // signal end-of-request
     shutdown(backend, SHUT_WR);
 
-    // 3) Buffer the entire backend response (header + body)
+    
     char *resp_buf = NULL;
     size_t resp_cap = 0, resp_len = 0;
     while ((n = recv(backend, buf, BUFFER_SIZE, 0)) > 0) {
@@ -92,7 +128,7 @@ void *handle_client(void *p) {
     }
     if (n < 0 && errno != ECONNRESET) perror("recv(backend)");
 
-    // 4) Send the full buffered response to the client
+ 
     size_t offset = 0;
     while (offset < resp_len) {
         ssize_t w = send(client, resp_buf + offset, resp_len - offset, 0);
@@ -143,5 +179,6 @@ int main() {
     }
 
     close(listener);
+    pthread_mutex_destroy(&backend_mutex);
     return 0;
 }
