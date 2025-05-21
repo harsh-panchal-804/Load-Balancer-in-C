@@ -9,8 +9,9 @@ A high-performance, multithreaded HTTP (Layer 7) load balancer written in C for 
 
 **[Deployed on AWS](http://ec2-13-203-231-9.ap-south-1.compute.amazonaws.com:3000/)**
 
+### Demo Video (GIF)
 
-**[Demo Video (takes sometime to load or goto demo_video)](demo_video/loadbalancergif.gif)**  
+![Load Balancer Demo](demo_video/loadbalancergif.gif)
 
 
 
