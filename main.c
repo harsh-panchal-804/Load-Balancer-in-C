@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <signal.h>
 #include <pthread.h>
 
 #define MAX_BACKEND 3
@@ -103,6 +104,7 @@ void *handle_client(void *p) {
 }
 
 int main() {
+    signal(SIGPIPE,SIG_IGN);
     int listener = socket(AF_INET, SOCK_STREAM, 0);
     if (listener < 0) { perror("socket"); exit(1); }
     int opt = 1;
